@@ -5,7 +5,7 @@
 
 var data_utils = require('./data-utils');
 
-var EventEmitter = require('events');
+var EventEmitter = require('events').EventEmitter;
 
 var path = require('path'),
     join = path.join,
@@ -43,7 +43,7 @@ var tests = [
             out = '',
             chunk;
           
-        for (var i=0; i < 10; i++) {
+        for (var i = 0; i < 10; i++) {
           expected += '' + i + "\n";
         } 
               
@@ -72,8 +72,8 @@ var tests = [
         var verifier = new data_utils.ChunkVerifier(what, 10),
             inStrs = [ "0", "\n1\n", "2\n", "3", "\n4\n5", "\n", "6\n7", "\n8", "\n9", "\n" ];
           
-        for (var inStr of inStrs) {
-          var err = verifier.verify(new Buffer(inStr, 'ascii'));
+        for (var i = 0; i < inStrs.length; i++) {
+          var err = verifier.verify(new Buffer(inStrs[i], 'ascii'));
           assert(null === err,
                  makeMsg(what, verifier.name + ' result not expected: ' + inspect(err)));
         }
@@ -100,7 +100,7 @@ var tests = [
             out = '',
             chunk;
           
-        for (var i=0; i < 10; i++) {
+        for (var i = 0; i < 10; i++) {
           expected += '' + i + "\n";
         } 
               

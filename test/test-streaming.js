@@ -385,7 +385,8 @@ function createExecTest(what, options) {
           }
       
           // all verifieres must be atEnd !!
-          for (var verifier of verifiers) {
+          for (var i = 0; i < verifiers.length; i++) {
+            var verifier = verifiers[i];
             assert(verifier.atEnd, 
                    makeMsg(what, 'client.exec.channel verifier ' + verifier.name + ' is not .atEnd'));
           }
@@ -472,10 +473,12 @@ function parseTestLine(line) {
   // client and server test parameters
   
   function parseParameters(what, parameterLine) {
-    var parameters = {};
-    
-    for (var parameter of parameterLine.split(',')) {
-      var m = /^([iIoOeE]):(\S+)$/.exec(parameter.trim());
+    var parameters = {},
+        parameterElements = parameterLine.split(',');
+        
+    for (var i = 0; i < parameterElements.length; i++) {
+      var parameter = parameterElements[i],
+          m = /^([iIoOeE]):(\S+)$/.exec(parameter.trim());
       
       if (!m) {
         return [ new Error(what + ' invalid parameter: ' + parameter) ];
@@ -526,8 +529,8 @@ function parseTestLine(line) {
 var tests = [];
 
 function createTestLines(testLines) {
-  for (var line of testLines) {
-    line = line.trim();
+  for (var i = 0; i < testLines.length; i++) {
+    var line = testLines[i].trim();
     if ('' === line) {
       continue;
     }
@@ -610,11 +613,14 @@ function setup(self, clientcfg, servercfg, strictStreams2, ignoreBadIdenfication
   }
 
   process.nextTick(function() {
-    server.listen(0, 'localhost', function() {
+    var address = process.env['ADDRESS'] || 'localhost',
+        port = (process.env['PORT'] && parseInt(process.env['PORT'])) || 0;
+    
+    server.listen(port, address, function() {
       if (clientcfg.sock)
-        clientcfg.sock.connect(server.address().port, 'localhost');
+        clientcfg.sock.connect(server.address().port, address);
       else {
-        clientcfg.host = 'localhost';
+        clientcfg.host = address;
         clientcfg.port = server.address().port;
       }
       client.connect(clientcfg);
@@ -651,6 +657,14 @@ process.once('exit', function() {
 
 // starts here - read, generates tests and execute next test
 
+var maybeDelayedNext = next;
+
+if (process.env['PIDDELAY']) {
+  console.error('pid: ' + process.pid);
+  maybeDelayedNext = function() {
+    setTimeout(next, parseInt(process.env['PIDDELAY'] * 1000));
+  }
+}
 
 if ('-' === process.argv[2]) {
   // read from stdin
@@ -659,7 +673,7 @@ if ('-' === process.argv[2]) {
     inData += d.toString('ascii');
   }).on('end', function() {
     createTestLines(inData.split("\n"));
-    next();
+    maybeDelayedNext();
   }).on('error', function(err) {
     console.error('error reading tests from stdin: ' + err);
     process.exit(1);
@@ -668,9 +682,9 @@ if ('-' === process.argv[2]) {
 else if (process.argv[2]) {
   // read from file at specified path
   createTestLines(fs.readFileSync(process.argv[2], { encoding:'ascii'}).split("\n"));
-  next();
+  maybeDelayedNext();
 } else {
   // hmm? we read from this directory the "standard" tests...
   createTestLines(fs.readFileSync(join(__dirname, 'streaming-tests.txt'), { encoding:'ascii'}).split("\n"));
-  next();
+  maybeDelayedNext();
 }

@@ -1112,6 +1112,15 @@ node test-streaming.js [-|path]
 path  read all test script lines from the file given at path [default:./streaming-tests.txt]
 </pre> 
 
+Environment variables
+
+<pre>
+DEBUG     if set will write the debug output to stdout, otherwise will output only errors to stderr 
+ADDRESS   specifies the address of the server [default:'localhost'].
+PORT      if set the server and client will use this port [default:0]
+PIDDELAY  if set will write out the pid of the test to stderr and delay the given seconds before startings the tests
+</pre>
+
 * Examples:
   
   echo 'maxNumber=10 Exec( o:sODV )<->( o:wGD )' | DEBUG=1 node test/test-streaming.js -
