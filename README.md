@@ -1107,11 +1107,11 @@ strict                          Ingore nothing, always fail.
                  If a stream (i,o) is used there must be on the sending side the generator, on the
                  receiving side the verifier.
     
-Verifiers:
+  Verifiers:
   sODV           Verify lines via the 'streamOnDataVerify' algorithm.
   vStream        Verify lines via the 'verifyStrean' algorithm.
   
-Generators:
+  Generators:
   wGD            Write lines via 'writeGeneratedData; algorithm.
   wGDWonDrain    Write lines via 'writeGeneratedDataWaitsOnDrain' algorithm.
   wStream        Write lines via a stream using the 'wStream' algorithm.
