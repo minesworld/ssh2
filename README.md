@@ -1139,9 +1139,11 @@ PIDDELAY  if set will write out the pid of the test to stderr and delay the give
 
 * Examples:
   
+  ```
   echo 'maxNumber=10 Exec( o:sODV )<->( o:wGD )' | DEBUG=1 node test/test-streaming.js -
    
   echo 'maxNumber=10 Exec( o:sODV,e:sODV )<->( o:wGD,e:wGDWonDrain ) ForwardOut( i:wStream )<->( i:vStream )' > tests.txt && node test/test-streaming.js tests.txt
+  ```
 
 * Creating a number of test script lines
 
