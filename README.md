@@ -1096,25 +1096,15 @@ strict                          Ingore nothing, always fail.
 
   <pre>
   Exec           The client will create a 'session' and do an 'exec' on the server. Thus stdin, stdout and stderr 
-                 are streams which can be tested.
-                 
-                 Parameters have to follow
-                 
-                               CLIENT                                SERVER
+                 are streams which can be tested. The format of ( CLIENT)<->( SERVER ) parameters are
                  ( i:generator,o:verifier,e:verifier )<->( i:verifier,o:generator,e:generator )
-                 
-                 format. If a stream (i,o,e) is used there must be on the sending side the generator, on the
+                 If a stream (i,o,e) is used there must be on the sending side the generator, on the
                  receiving side the verifier.
                  
   ForwardOut     The client will create a 'forwardOut' which results in a 'tcpip' request on the server. This
-                 stdin and stdout are stremas which can be tested.
-                
-                 Parameters have to follow
-                 
-                               CLIENT                                SERVER
+                 stdin and stdout are stremas which can be tested. The Format of ( CLIENT )<->( SERVER ) parameters are
                  ( i:generator,o:verifier )<->( i:verifier,o:generator )
-                 
-                 format. If a stream (i,o) is used there must be on the sending side the generator, on the
+                 If a stream (i,o) is used there must be on the sending side the generator, on the
                  receiving side the verifier.
     
 Verifiers:
