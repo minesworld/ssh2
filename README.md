@@ -1106,8 +1106,8 @@ strict                          Ingore nothing, always fail.
                  format. If a stream (i,o,e) is used there must be on the sending side the generator, on the
                  receiving side the verifier.
                  
-  ForwardOut    The client will create a 'forwardOut' which results in a 'tcpip' request on the server. This
-                stdin and stdout are stremas which can be tested.
+  ForwardOut     The client will create a 'forwardOut' which results in a 'tcpip' request on the server. This
+                 stdin and stdout are stremas which can be tested.
                 
                  Parameters have to follow
                  
