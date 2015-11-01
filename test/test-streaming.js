@@ -3,7 +3,8 @@
 // (c) 2015 Michael Keller, minesworld-technologies.com , published under MIT license
 // parts of code (c) mscdex
 
-var data_utils = require('./data-utils');
+var EventEmitter = require('events').EventEmitter,
+    data_utils = require('./data-utils');
 
 var Client = require('../lib/client'),
     Server = require('../lib/server'),
@@ -34,7 +35,16 @@ var USER = 'nodejs',
     CLIENT_KEY_RSA_PUB = utils.genPublicKey(utils.parseKey(CLIENT_KEY_RSA)),
     CLIENT_KEY_DSA = fs.readFileSync(join(fixturesdir, 'id_dsa')),
     CLIENT_KEY_DSA_PUB = utils.genPublicKey(utils.parseKey(CLIENT_KEY_DSA)),
-    DEBUG = process.env['DEBUG'];
+    DEBUG = process.env['DEBUG'],
+    exitOnSourceEnd = process.env['exitOnSourceEnd']
+                      && !process.env['strictStreams2']
+                      && !process.env['strict'],
+    endWorkaround = process.env['endWorkaround']
+                    && !process.env['strictStreams2']
+                    && !process.env['strict'],
+    disconnectOnFirstFinish = process.env['disconnectOnFirstFinish']
+                    && !process.env['strictStreams2']
+                    && !process.env['strict'];
     
 var debug = function() {};
 
@@ -47,51 +57,45 @@ if (DEBUG) {
     debug('[INFO] ' + key + ': ' + process.versions[key]);
   }
   debug('[INFO] platform: ' + process.platform + ' ' + process.arch);
+  
+  debug('[INFO] strictStreams2: ' + process.env['strictStreams2']);
+  debug('[INFO] failOnBadIdentificationStarts: ' + process.env['failOnBadIdentificationStarts']);
+  debug('[INFO] exitOnSourceEnd: ' + exitOnSourceEnd);
+  debug('[INFO] endWorkaround: ' + endWorkaround);
+  debug('[INFO] disconnectOnFirstFinish: ' + disconnectOnFirstFinish);
+  debug('[INFO] strict: ' + process.env['strict']);
 }
 
 // 
 
-function Timeout(name, ms) {
-  if (undefined === ms || 0 > ms) {
-    this.renew = function(b, n) {};
-    this.clear = function() {};
-    return;
-  }
-  
-  var lastRenew = Date.now(),
-      lastNumber,
-      lastBytes;
-  
-  var  intervalID = setInterval(function() {
-        var d = Date.now() - lastRenew;
-        assert(ms > d,
-               makeMsg(name, 'timed out after: ' + d + 'ms ' + lastNumber + ',#' + lastBytes));
-      }, 500);
-      
-  this.renew = function(b, n) {
-    var d = Date.now() - lastRenew;
-    assert(ms > d,
-           makeMsg(name, 'timed out after: ' + d + 'ms ' + lastNumber + ',#' + lastBytes + ' -> ' + n + ',#' + b));
-
-    lastBytes = b;
-    lastNumber = n;
-    
-    lastRenew = Date.now();
-  };
-  
-  this.clear = function() {
-    clearInterval(intervalID);
-  }
-  
-  this.renew();
-}
-
-    
 function wGD(stream, generator, timeout, done) {
   // writeGeneratedData
   
-  var t = new Timeout(generator.name + ' wGD', timeout);
+  var t = new data_utils.Timeout(generator.name + ' wGD', timeout, function(name, d, lastNumber, lastBytes) {
+            assert(true,
+                   makeMsg(name, 'timed out after: ' + d + 'ms ' + lastNumber + ',#' + lastBytes));
+          });
 
+  stream
+    .on('finish', function() {
+      debug('[EVENT] finish ' + generator.name + ' wGD');
+      done(null, 'finish');
+      if (!endWorkaround) { // done(close) might call stream.end...
+        done(null, 'close'); // according to the specs not all streams must emit an close event
+      } 
+      else {
+        debug('[FIX] endWorkaround ' + generator.name + ' wGD stream');
+      }
+    })
+    .on('close', function() {
+      debug('[EVENT] close ' + generator.name + ' wGD');
+      done(null, 'close'); // all done, can savely close
+    })
+    .on('error', function(err) {
+      debug('[EVENT] error ' + generator.name + ' wGD');
+      done(err);
+    });
+    
   function write() {
     
     while (!generator.atEnd) {
@@ -101,7 +105,17 @@ function wGD(stream, generator, timeout, done) {
       t.renew(generator.generated, generator.number);
     }
     t.clear();
-    done();
+    
+    if (exitOnSourceEnd) {
+      debug('[FIX] exitOnSourceEnd ' + generator.name);
+      done(null, 'finish'); // this may call stream.exit()
+    }
+    if (!endWorkaround) { // don't end stream here as another stream might be still transferring data...
+      stream.end(); 
+    }
+    else {
+      debug('[FIX] endWorkaround ' + generator.name + ' wGD write');
+    }
   }
   
   setImmediate(write);
@@ -114,8 +128,31 @@ function wGDWonDrain(stream, generator, timeout, done) {
   
   // code analog to stream.Writable.write documentation example
 
-  var t = new Timeout(generator.name + ' wGDWonDrain', timeout);
+  var t = new data_utils.Timeout(generator.name + ' wGDWonDrain', timeout, function(name, d, lastNumber, lastBytes) {
+            assert(true,
+                   makeMsg(name, 'timed out after: ' + d + 'ms ' + lastNumber + ',#' + lastBytes));
+          });
   
+  stream
+    .on('finish', function() {
+      debug('[EVENT] finish ' + generator.name + ' wGDWonDrain');
+      done(null, 'finish');
+      if (!endWorkaround) { // done(close) might call stream.end...
+        done(null, 'close'); // according to the specs not all streams must emit an close event
+      }
+      else {
+        debug('[FIX] endWorkaround ' + generator.name + ' wGDWonDrain stream');
+      }
+    })
+    .on('close', function() {
+      debug('[EVENT] close ' + generator.name + ' wGDWonDrain');
+      done(null, 'close'); // all done, can savely close
+    })
+    .on('error', function(err) {
+      debug('[EVENT] error ' + generator.name + ' wGDWonDrain');
+      done(err);
+    });
+    
   function write() {
     var ok,
         chunk;
@@ -129,7 +166,17 @@ function wGDWonDrain(stream, generator, timeout, done) {
         // last time
         return stream.write(chunk, function() {
           t.clear();
-          done();
+
+          if (exitOnSourceEnd) {
+            debug('[FIX] exitOnSourceEnd ' + generator.name);
+            done(null, 'finish'); // this may call stream.exit()
+          }
+          if (!endWorkaround) { // don't end stream here as another stream might be still transferring data...
+            stream.end();
+          }
+          else {
+            debug('[FIX] endWorkaround ' + generator.name + ' wGDWonDrain write');
+          }
         });
       }
       else {
@@ -151,10 +198,79 @@ function wGDWonDrain(stream, generator, timeout, done) {
   return stream;
 }
 
+function wStream(stream, generator, timeout, done) {
+  // writeStream
+  
+  function createPipe() {
+    var t = new data_utils.Timeout(generator.name + ' wStream', timeout, function(name, d, lastNumber, lastBytes) {
+              assert(true,
+                     makeMsg(name, 'timed out after: ' + d + 'ms ' + lastNumber + ',#' + lastBytes));
+            });
+
+    var source = new data_utils.StreamOfNumberLines(generator);
+    
+    source
+      .on('willpush', function(chunk) {
+        t.renew(generator.generated, generator.number);
+
+        if (chunk) {
+          debug('[DATA] ' + generator.name + ' wStream push(' + chunk.length + ') .atEnd=' + generator.atEnd + '  #' + generator.generated);
+        }
+        else {
+          debug('[DATA] ' + generator.name + ' wStream push(null) .atEnd=' + generator.atEnd + '  #' + generator.generated);
+         }
+      })
+      .on('end', function() {
+        debug('[EVENT] end ' + generator.name + ' wStream #' + generator.generated);
+        if (exitOnSourceEnd) {
+          debug('[FIX] exitOnSourceEnd ' + generator.name);
+          done(null, 'finish'); // this may call stream.exit()
+        }
+      })
+      .on('close', function() {
+        debug('[EVENT] close ' + generator.name + ' wStream source #' + generator.generated);
+      })      
+      .on('error', function(err) {
+        t.clear();
+        debug('[EVENT] error ' + generator.name + ' wStream source #' + generator.generated);
+        done(err);
+      })
+      
+      .pipe(stream, {end:!endWorkaround})
+      .on('finish', function() {
+        debug('[EVENT] finish ' + generator.name + ' wStream');
+        done(null, 'finish');
+        if (!endWorkaround) { // don't end stream here as another stream might be still transferring data...
+          done(null, 'close'); // according to the specs not all streams must emit an close event    
+        }
+        else {
+          debug('[FIX] endWorkaround ' + generator.name + ' wStream target');
+        }
+      })
+      .on('close', function() {
+        t.clear();
+        debug('[EVENT] close ' + generator.name + ' wStream target');
+        done(null, 'close'); // all done, can savely close
+      })      
+      .on('error', function(err) {
+        t.clear();
+        debug('[EVENT] error ' + generator.name + ' wStream target');
+        done(err);
+      })      
+  }
+  
+  setImmediate(createPipe);
+   
+  return stream;
+}
+
 function sODV(stream, verifier, timeout, done) {
   // streamOnDataVerify
 
-  var t = new Timeout(verifier.name + ' sODV', timeout);
+  var t = new data_utils.Timeout(verifier.name + ' sODV', timeout, function(name, d, lastNumber, lastBytes) {
+            assert(true,
+                   makeMsg(name, 'timed out after: ' + d + 'ms ' + lastNumber + ',#' + lastBytes));
+          });
 
   return stream.on('data', function(d) {
     debug('[EVENT] data ' + verifier.name + ' sODV (' + d.length + ') #' + verifier.checked);
@@ -173,21 +289,667 @@ function sODV(stream, verifier, timeout, done) {
   });
 }
 
-function createExecTest(what, options) {
+
+function vStream(stream, verifier, timeout, done) {
+  // verifyStream
+
+  var t = new data_utils.Timeout(verifier.name + ' vStream', timeout, function(name, d, lastNumber, lastBytes) {
+            assert(true,
+                   makeMsg(name, 'timed out after: ' + d + 'ms ' + lastNumber + ',#' + lastBytes));
+          });
+  
+  function createPipe() {
+    var target = new data_utils.NumberLineStreamVerifier(verifier);
+  
+    stream
+      .on('end', function() {
+        debug('[EVENT] end ' + verifier.name + ' vStream');        
+      })
+      .on('close', function() {
+        debug('[EVENT] close ' + verifier.name + ' vStream');        
+      })
+      .on('error', function(err) {
+        t.clear();
+        debug('[EVENT] error ' + verifier.name + ' vStream source');        
+        done(err);
+      })
+      .pipe(target)
+      .on('verify', function(chunk) {
+        debug('[DATA] ' + verifier.name + ' vStream (' + chunk.length + ') #' + verifier.checked);
+        t.renew(verifier.checked, verifier.number);
+      })
+      .on('finish', function() {
+        t.clear();
+        debug('[EVENT] finish ' + verifier.name + ' vStream');        
+        done();
+      })
+      .on('error', function(err) {
+        t.clear();
+        debug('[EVENT] error ' + verifier.name + ' vStream target');        
+        done(err);
+      });
+  }
+      
+  setImmediate(createPipe);   
+    
+  return stream;
+}
+
+//
+
+
+function serverExec(what, session, options, sOptions, cb) {
+  var maxNumber = options.maxNumber,
+      maxChunkSize,
+      strictStreams2 = options.strictStreams2 || options.strict,
+      ignoreBadIdenficationStarts = !options.failOnBadIdentificationStarts && !options.strict,
+      timeout = (options.timeout && options.timeout * 1000) || -1;
+  
+  session.once('exec', function(accept, reject, info) {
+    assert(info.command === 'foo --bar',
+           makeMsg(what, 'Wrong exec command: ' + info.command));
+           
+    debug('[EVENT] exec server.session(f,f,' + inspect(info) + ')');
+           
+    var stream = accept();
+
+    var writesFinished = 0,
+        writesClosed = 0,
+        writersEmittedFinish = 0,
+        flags = 0, // 1=stdout, 2=stderr, 4=stdin
+        exited = false,
+        ended = false;
+  
+    var generator,
+        verifier;
+    
+  
+    // exit and end if all generators finished
+
+    function finish(what) {
+      if (undefined !== what) writesFinished |= what;
+      
+      debug('[CHECK] server.session.exec finish(' + what + ') => ' + writesFinished);
+
+      if (writesFinished != flags) return;
+
+      if (!exited) {
+        exited = true;
+        debug('[CHECK] server.session.exec.exit(100)');
+        stream.exit(100);
+      }
+      
+      // this is a critical workaround - as 
+      
+      if (endWorkaround) {
+        close(writesFinished);
+      }
+    }
+    
+    function emittedFinish(what) {
+      if (undefined !== what) {
+        writersEmittedFinish |= what;
+      }
+
+      debug('[CHECK] server.session.exec finish emitted(' + what + ') => ' + writersEmittedFinish + '/' + flags);
+      
+      if ((writersEmittedFinish & 3) !== (flags & 3) && !disconnectOnFirstFinish) return;
+
+      console.log(cb);
+
+      if (cb) {
+        var cbx = cb;
+        cb = null;
+        setImmediate(cbx);
+      }
+      else {
+        debug('[IGNORE] server.session.exec second callback')
+      }
+    }
+    
+    stream.once('finish', function() {
+      debug('[EVENT] finish server.session.exec.stream')
+      emittedFinish(flags & 1);
+    });
+    
+    stream.stderr.once('finish', function() {
+      debug('[EVENT] finish server.session.exec.stream.stderr')
+      emittedFinish(flags & 2);
+    });
+    
+    function close(what) {
+      if (undefined !== what) {
+        writesClosed |= what;
+      }
+        
+      debug('[CHECK] server.session.exec close(' + what + ') => ' + writesClosed + '/' + flags);
+
+      if ((writesClosed & 3) != (flags & 3)) return; // ignore stdin
+      
+      if (endWorkaround) {
+        if (!ended) {
+          ended = true;
+          debug('[CHECK] server.session.exec.end()');
+          stream.end() // will close BOTH stdout AND stderr !!
+        }
+      }
+    }
+    
+    function createWriteDoneFunc(name, generator, writer) {
+      return function(err, event) {
+        assert(!err, 
+               makeMsg(what, name + ' ' + generator.name + ' err: ' + inspect(err)));
+               
+        debug('[CHECK] ' + generator.name + ' ' + name + ':cb(' + inspect(err) + ', ' + event + ')');
+        
+        if (event === 'finish') {
+          finish(writer);
+        }
+        else if (event === 'close') {
+          close(writer);
+        }
+      }
+    }
+    
+    function createVerifyDoneFunc(name, verifier) {
+      return function(err) {
+        assert(undefined === err, 
+              makeMsg(what, name + ' ' + verifier.name + ' err: ' + inspect(err)));
+          
+        debug('[CHECK] ' + verifier.name + ' ' + name + ':cb(' + inspect(err) + ')');
+        
+        finish(4);
+      }  
+    }
+    
+    
+    
+    // create verifier on stdin
+    verifier = new data_utils.ChunkVerifier('server.session.exec.stdin', maxNumber);
+
+    if ('sODV' === sOptions.server.stdin) {
+      sODV(stream, verifier, timeout, createVerifyDoneFunc('sODV', verifier));
+      flags |= 4;
+    }
+    else if ('vStream' === sOptions.server.stdin) {
+      vStream(stream, verifier, timeout, createVerifyDoneFunc('vStream', verifier));
+      flags |= 4;
+    }
+    else {
+      assert(!sOptions.server.stdin,
+             makeMsg('unhandled server stdin Exec parameter: ' + sOptions.server.stdin));
+    }
+     
+
+    // create data writers stdout
+    generator = new data_utils.ChunkGenerator('server.session.exec.stdout', maxNumber, maxChunkSize);
+
+    if ('wGD' === sOptions.server.stdout) {
+      wGD(stream, generator, timeout, createWriteDoneFunc('wGD', generator, 1));
+      flags |= 1;
+    } 
+    else if ('wGDWonDrain' === sOptions.server.stdout) {
+      wGDWonDrain(stream, generator, timeout, createWriteDoneFunc('wGDWonDrain', generator, 1));
+      flags |= 1;        
+    }
+    else if ('wStream' === sOptions.server.stdout) {
+      wStream(stream, generator, timeout, createWriteDoneFunc('wStream', generator, 1));
+      flags |= 1;        
+    }
+    else {
+      assert(!sOptions.server.stdout,
+             makeMsg('unhandled server stdout Exec parameter: ' + sOptions.server.stdout));
+    }
+
+    // create data writers stderr
+    generator = new data_utils.ChunkGenerator('server.session.exec.stderr', maxNumber, maxChunkSize);
+
+    if ('wGD' === sOptions.server.stderr) {
+      wGD(stream.stderr, generator, timeout, createWriteDoneFunc('wGD', generator, 2));
+      flags |= 2;
+    }
+    else if ('wGDWonDrain' === sOptions.server.stderr) {
+      wGDWonDrain(stream.stderr, generator, timeout, createWriteDoneFunc('wGDWonDrain', generator, 2));
+      flags |= 2;        
+    }
+    else if ('wStream' === sOptions.server.stderr) {
+      wStream(stream.stderr, generator, timeout,  createWriteDoneFunc('wStream', generator, 2));
+      flags |= 2;        
+    }
+    else {
+      assert(!sOptions.server.stderr,
+             makeMsg('unhandled server stderr Exec parameter: ' + sOptions.server.stderr));
+    }
+    
+  }); // session.once:exec
+}
+
+function clientExec(what, client, options, sOptions, cb) {
+  var maxNumber = options.maxNumber,
+      maxChunkSize,
+      strictStreams2 = options.strictStreams2 || options.strict,
+      ignoreBadIdenficationStarts = !options.failOnBadIdentificationStarts && !options.strict,
+      timeout = (options.timeout && options.timeout * 1000) || -1;
+    
+  var emitter = new EventEmitter();
+  
+  client.exec('foo --bar', function(err, stream) {
+    assert(!err, makeMsg(what, 'Unexpected exec error: ' + err));
+    debug('[CHECK] client.exec(e,s)');
+    
+    var closeEmitted = false;
+
+    var verifiers = [],
+        flags = 0,
+        writesFinished = 0;
+    
+    var generator,
+        verifier;
+        
+    function createVerifyDoneFunc(name, verifier) {
+      return function(err) {
+        assert(undefined === err, 
+              makeMsg(what, name + ' ' + verifier.name + ' err: ' + inspect(err)));
+              
+        debug('[CHECK] ' + verifier.name + ' ' + name + ':cb(' + inspect(err) + ')');
+      }  
+    }
+    
+    function createWriteDoneFunc(name, generator, writer) {
+      return function(err, event) {
+        assert(!err, 
+               makeMsg(what, name + ' ' + generator.name + ' err: ' + inspect(err)));
+               
+        debug('[CHECK] ' + generator.name + ' ' + name + ':cb(' + inspect(err) + ', ' + event + ')');
+        
+        if (event === 'finish') {
+          writesFinished |= 1;
+          debug('[CHECK] client.exec.stdin.end()');
+          stream.end();
+        }
+        else if (event === 'close') {
+        }
+      }
+    }
+    
+    // create data writer stdin
+    generator = new data_utils.ChunkGenerator('client.exec.stdin', maxNumber, maxChunkSize);
+
+    if ('wGD' === sOptions.client.stdin) {
+      wGD(stream, generator, timeout, createWriteDoneFunc('wGD', generator, 1));
+      flags |= 1;
+    } 
+    else if ('wGDWonDrain' === sOptions.client.stdin) {
+      wGDWonDrain(stream, generator, timeout, createWriteDoneFunc('wGDWonDrain', generator, 1));
+      flags |= 1;        
+    }
+    else if ('wStream' === sOptions.client.stdin) {
+      wStream(stream, generator, timeout, createWriteDoneFunc('wStream', generator, 1));
+      flags |= 1;        
+    }
+    else {
+      assert(!sOptions.server.stdin,
+             makeMsg('unhandled client stdin Exec parameter: ' + sOptions.client.stdin));
+    }
+    
+
+    // create verifier on stdout
+    verifier = new data_utils.ChunkVerifier('client.exec.stdout', maxNumber);
+
+    if ('sODV' === sOptions.client.stdout) {
+      sODV(stream, verifier, timeout, createVerifyDoneFunc('sODV', verifier));
+      verifiers.push(verifier);
+    }
+    else if ('vStream' === sOptions.client.stdout) {
+      vStream(stream, verifier, timeout, createVerifyDoneFunc('vStream', verifier));
+      verifiers.push(verifier);
+    }
+    else {
+      assert(!sOptions.client.stdout,
+             makeMsg('unhandled client stdout Exec parameter: ' + sOptions.client.stdout));
+    }
+
+    // create verifier on stderr
+    verifier = new data_utils.ChunkVerifier('client.exec.stderr', maxNumber);
+
+    if ('sODV' === sOptions.client.stderr) {
+      sODV(stream.stderr, verifier, timeout, createVerifyDoneFunc('sODV', verifier));      
+      verifiers.push(verifier);
+    }
+    else if ('vStream' === sOptions.client.stderr) {
+      vStream(stream.stderr, verifier, timeout, createVerifyDoneFunc('vStream', verifier));
+      verifiers.push(verifier);
+    }
+    else {
+      assert(!sOptions.client.stderr,
+             makeMsg('unhandled client stderr Exec parameter: ' + sOptions.client.stderr));
+    }
+
+    //
+
+    stream.on('exit', function(code) {
+      debug('[EVENT] exit client.exec.channel(' + inspect(arguments) + ')');
+                
+      var args = new Array(arguments.length);
+      for (var i = 0; i < args.length; ++i)
+        args[i] = arguments[i];
+      
+      // stdin must have finished
+      assert(writesFinished == flags,
+        makeMsg(what, 'client.exec.channel emitted close before stdin.end()'));
+      
+      emitter.emit('exit', args);
+    }).on('close', function(code) {
+      debug('[EVENT] close client.exec.channel(' + inspect(arguments) + ')');
+
+      closeEmitted = true;
+  
+      var args = new Array(arguments.length);
+      for (var i = 0; i < args.length; ++i)
+        args[i] = arguments[i];
+      
+      emitter.emit('close', args);
+  
+    }).on('end', function() {
+      debug('[EVENT] end client.exec.channel()');
+  
+      if (strictStreams2) {
+        assert(closeEmitted === false,
+               makeMsg(what, 'client.exec.channel emitted close before end'));
+      }
+      else if (closeEmitted) {
+        debug('[IGNORE] client.exec.channel emitted close before end');
+      }
+  
+      // all verifieres must be atEnd !!
+      for (var verifier of verifiers) {
+        assert(verifier.atEnd, 
+               makeMsg(what, 'client.exec.channel verifier ' + verifier.name + ' is not .atEnd'));
+      }
+      
+      // stdin must have finished
+      assert(writesFinished == flags,
+        makeMsg(what, 'client.exec.channel emitted close before stdin.end()'));
+      
+      if (cb) {
+        var cbx = cb;
+        cb = null;
+        setImmediate(cbx);
+      }
+      else {
+        debug('[IGNORE] client.exec second callback')
+      }
+      
+    }); // stream.on
+    
+  }); // client.exec  
+  
+  return emitter;
+}
+
+
+//
+
+function serverData(what, stream, options, sOptions, cb) {
+  var maxNumber = options.maxNumber,
+      maxChunkSize,
+      strictStreams2 = options.strictStreams2 || options.strict,
+      ignoreBadIdenficationStarts = !options.failOnBadIdentificationStarts && !options.strict,
+      timeout = (options.timeout && options.timeout * 1000) || -1;
+  
+  var flags = 0,
+      closed = 0,
+      finished = 0;
+  
+  var generator,
+      verifier;
+  
+  stream.once('finish', function() {
+    debug('[EVENT] finish server.tcpip')
+    
+    if (cb) {
+      var cbx = cb;
+      cb = null;
+      setImmediate(cbx);
+    }
+    else {
+      debug('[IGNORE] server.tcpip second callback')
+    }
+  });
+  
+  function finish(what) {
+    if (undefined !== what) finished |= what;
+    
+    debug('[CHECK] server finish(' + what + ') => ' + finished);
+
+    if (finished != flags) return;
+
+   // this is a critical workaround - as 
+    
+    if (endWorkaround) {
+      close(3);
+    }
+  }
+  
+  function close(what) {
+    if (undefined !== what) {
+      closed |= what;
+    }
+      
+    debug('[CHECK] server close(' + what + ') => ' + closed);
+
+    if (closed != flags) return;
+    
+    if (endWorkaround) {
+      debug('[CHECK] server.tcpip.end()');
+      stream.end();
+    }
+  }
+  
+  function createWriteDoneFunc(name, generator) {
+    return function(err, event) {
+      assert(!err, 
+             makeMsg(what, name + ' ' + generator.name + ' err: ' + inspect(err)));
+             
+      debug('[CHECK] ' + generator.name + ' ' + name + ':cb(' + inspect(err) + ', ' + event + ')');
+      
+      if (event === 'finish') {
+        finish(2);
+      }
+      else if (event === 'close') {
+        close(2);
+      }
+    }
+  }
+  
+  function createVerifyDoneFunc(name, verifier) {
+    return function(err) {
+      assert(undefined === err, 
+            makeMsg(what, name + ' ' + verifier.name + ' err: ' + inspect(err)));
+        
+      debug('[CHECK] ' + verifier.name + ' ' + name + ':cb(' + inspect(err) + ')');
+      
+      finish(1);
+    }  
+  }
+  
+  
+  
+  // create verifier on 'stdin'
+  verifier = new data_utils.ChunkVerifier('server.tcpip', maxNumber);
+
+  if ('sODV' === sOptions.server.stdin) {
+    sODV(stream, verifier, timeout, createVerifyDoneFunc('sODV', verifier));
+    flags |= 1;
+  }
+  else if ('vStream' === sOptions.server.stdin) {
+    vStream(stream, verifier, timeout, createVerifyDoneFunc('vStream', verifier));
+    flags |= 1;
+  }
+  else {
+    assert(!sOptions.server.stdin,
+           makeMsg('unhandled server stdin Exec parameter: ' + sOptions.server.stdin));
+  }
+   
+
+  // create data writers stdout
+  generator = new data_utils.ChunkGenerator('server.tcpip', maxNumber, maxChunkSize);
+
+  if ('wGD' === sOptions.server.stdout) {
+    wGD(stream, generator, timeout, createWriteDoneFunc('wGD', generator, 1));
+    flags |= 2;
+  } 
+  else if ('wGDWonDrain' === sOptions.server.stdout) {
+    wGDWonDrain(stream, generator, timeout, createWriteDoneFunc('wGDWonDrain', generator, 1));
+    flags |= 2;        
+  }
+  else if ('wStream' === sOptions.server.stdout) {
+    wStream(stream, generator, timeout, createWriteDoneFunc('wStream', generator, 1));
+    flags |= 2;        
+  }
+  else {
+    assert(!sOptions.server.stdout,
+           makeMsg('unhandled server stdout Exec parameter: ' + sOptions.server.stdout));
+  }
+}
+
+function clientData(what, desc, stream, options, sOptions, cb) {
+  var maxNumber = options.maxNumber,
+      maxChunkSize,
+      strictStreams2 = options.strictStreams2 || options.strict,
+      ignoreBadIdenficationStarts = !options.failOnBadIdentificationStarts && !options.strict,
+      timeout = (options.timeout && options.timeout * 1000) || -1;
+    
+  var emitter = new EventEmitter();
+  
+  var closeEmitted = false;
+
+  var flags = 0,
+      writesFinished = 0;
+  
+  var generator,
+      verifier;
+      
+  function createVerifyDoneFunc(name, verifier) {
+    return function(err) {
+      assert(undefined === err, 
+            makeMsg(what, name + ' ' + verifier.name + ' err: ' + inspect(err)));
+            
+      debug('[CHECK] ' + verifier.name + ' ' + name + ':cb(' + inspect(err) + ')');
+    }  
+  }
+  
+  function createWriteDoneFunc(name, generator, writer) {
+    return function(err, event) {
+      assert(!err, 
+             makeMsg(what, name + ' ' + generator.name + ' err: ' + inspect(err)));
+             
+      debug('[CHECK] ' + generator.name + ' ' + name + ':cb(' + inspect(err) + ', ' + event + ')');
+      
+      if (event === 'finish') {
+        writesFinished |= 1;
+        debug('[CHECK] client.forwardOut.end()');
+        stream.end();
+      }
+      else if (event === 'close') {
+      }
+    }
+  }
+  
+  // create data writer stdin
+  generator = new data_utils.ChunkGenerator('client.' + desc + '.stdin', maxNumber, maxChunkSize);
+
+  if ('wGD' === sOptions.client.stdin) {
+    wGD(stream, generator, timeout, createWriteDoneFunc('wGD', generator, 1));
+    flags |= 1;
+  } 
+  else if ('wGDWonDrain' === sOptions.client.stdin) {
+    wGDWonDrain(stream, generator, timeout, createWriteDoneFunc('wGDWonDrain', generator, 1));
+    flags |= 1;        
+  }
+  else if ('wStream' === sOptions.client.stdin) {
+    wStream(stream, generator, timeout, createWriteDoneFunc('wStream', generator, 1));
+    flags |= 1;        
+  }
+  else {
+    assert(!sOptions.server.stdin,
+           makeMsg('unhandled client stdin Exec parameter: ' + sOptions.client.stdin));
+  }
+  
+
+  // create verifier on stdout
+  verifier = new data_utils.ChunkVerifier('client.' + desc + '.stdout', maxNumber);
+
+  if ('sODV' === sOptions.client.stdout) {
+    sODV(stream, verifier, timeout, createVerifyDoneFunc('sODV', verifier));
+    flags |= 2;
+  }
+  else if ('vStream' === sOptions.client.stdout) {
+    vStream(stream, verifier, timeout, createVerifyDoneFunc('vStream', verifier));
+    flags |= 2;
+  }
+  else {
+    assert(!sOptions.client.stdout,
+           makeMsg('unhandled client stdout Exec parameter: ' + sOptions.client.stdout));
+  }
+
+  //
+
+  stream.on('close', function() {
+    debug('[EVENT] close client.' + desc);
+
+    closeEmitted = true;
+
+  }).on('end', function() {
+    debug('[EVENT] end client.' + desc);
+
+    if (strictStreams2) {
+      assert(closeEmitted === false,
+             makeMsg(what, 'client.' + desc + ' emitted close before end'));
+    }
+    else if (closeEmitted) {
+      debug('[IGNORE] client.' + desc + ' emitted close before end');
+    }
+
+    // all verifieres must be atEnd !!
+    if (2 === (flags & 2)) {
+      assert(verifier.atEnd, 
+             makeMsg(what, 'client.' + desc + ' verifier ' + verifier.name + ' is not .atEnd'));
+    }
+    
+    // stdin must have finished
+    assert((writesFinished & 1) === (flags & 1),
+      makeMsg(what, 'client.' + desc + ' emitted close before stdin.end()'));
+
+    if (cb) {
+      var cbx = cb;
+      cb = null;
+      setImmediate(cbx);
+    }
+    else {
+      debug('[IGNORE] client.' + desc + ' second callback')
+    }
+    
+  }); // stream.on
+}
+
+//
+
+function createTest(what, options) {
   
   var run = function() {
     var self = this,
         out = '',
         outErr = '',
-        exitArgs,
-        closeArgs,
+        exitArgs = [],
+        closeArgs = [],
+        execTestCount = 0,
+        clientTestsRunning = 0,
+        port = 0,
         client,
         server,
-        maxNumber = options.maxNumber,
-        maxChunkSize,
         strictStreams2 = options.strictStreams2 || options.strict,
         ignoreBadIdenficationStarts = !options.failOnBadIdentificationStarts && !options.strict,
-        timeout = (options.timeout && options.timeout * 1000) || -1,
         r;
 
     r = setup(this,
@@ -212,196 +974,123 @@ function createExecTest(what, options) {
       }).on('ready', function() {
         debug('[EVENT] ready server()');
 
-        conn.once('session', function(accept, reject) {
-          debug('[EVENT] session server(f,f)');
-          
-          var session = accept();
-          session.once('exec', function(accept, reject, info) {
-            assert(info.command === 'foo --bar',
-                   makeMsg(what, 'Wrong exec command: ' + info.command));
-                   
-            debug('[EVENT] exec server.session(f,f,' + inspect(info) + ')');
-                   
-            var stream = accept();
-      
-            var writesEnded = 0, 
-                exitAtWritesEnded = 0;
-          
-            // exit and end if all generators finished
-      
-            function end(what) {
-              if (undefined !== what) writesEnded |= what;
-              
-              debug('[CHECK] server end(' + what + ') => ' + writesEnded);
         
-              if (writesEnded != exitAtWritesEnded) return;
-        
-              stream.exit(100);
-              stream.end();        
-              conn.end();
-            }
-      
-            var generator;
-      
-            // create data writers stdout
-            generator = new data_utils.ChunkGenerator('server.session.exec.stdout', maxNumber, maxChunkSize);
-      
-            if ('wGD' === options.server.stdout) {
-              wGD(stream, generator, timeout, function(err) { 
-                assert(!err, 
-                       makeMsg(what, 'wGD ' + generator.name + ' err: ' + inspect(err)));
-                       
-                debug('[CHECK] ' + generator.name + ' wGD:cb(' + inspect(err) + ')');
-                
-                end(1);
-              });
-              exitAtWritesEnded |= 1;
-            } 
-            else if ('wGDWonDrain' === options.server.stdout) {
-              wGDWonDrain(stream, generator, timeout, function(err) { 
-                assert(!err, 
-                       makeMsg(what, 'wGDWonDrain ' + generator.name + ' err: ' + inspect(err)));
-                       
-                debug('[CHECK] ' + generator.name + ' wGDWonDrain:cb(' + inspect(err) + ')');
-                
-                end(1);
-              });
-              exitAtWritesEnded |= 1;        
-            }
-            else {
-              assert(!options.server.stdout,
-                     makeMsg('unhandled server stdout Exec parameter: ' + options.server.stdout));
-            }
-     
-            // create data writers stderr
-            generator = new data_utils.ChunkGenerator('server.session.exec.stderr', maxNumber, maxChunkSize);
-      
-            if ('wGD' === options.server.stderr) {
-              wGD(stream.stderr, generator, timeout, function(err) {          
-                assert(!err, 
-                       makeMsg(what, 'wGD ' + generator.name + ' err: ' + inspect(err)));
-                       
-                debug('[CHECK] ' + generator.name + ' wGD:cb(' + inspect(err) + ')');
-                
-                end(2);
-              });
-              exitAtWritesEnded |= 2;
-            }
-            else if ('wGDWonDrain' === options.server.stderr) {
-              wGDWonDrain(stream.stderr, generator, timeout, function(err) { 
-                assert(!err, 
-                       makeMsg(what, 'wGDWonDrain ' + generator.name + ' err: ' + inspect(err)));
-                       
-                debug('[CHECK] ' + generator.name + ' wGDWonDrain:cb(' + inspect(err) + ')');
-                
-                end(2);
-              });
-              exitAtWritesEnded |= 2;        
-            }
-            else {
-              assert(!options.server.stderr,
-                     makeMsg('unhandled server stderr Exec parameter: ' + options.server.stderr));
-            }
+        var subtests = Array.from(options['subtests']),
+            running = 0;
             
-          }); // session.once:exec
+        function findSubtest(request, type) {
+          // find a matching Exec test
+          var subtest;
+        
+          for (var i = 0; i < subtests.length; i++) {
+            if (type === subtests[i]['type'] ) {
+              return subtests.splice(i, 1)[0];
+            }
+          }
+        
+          throw new Error('server can not handle unmatched test request: ' + request);
+        }
+            
+        function finishedServerSubtest(err) {
+          running -= 1;
+          debug('[CHECK] server subtest finished (' + running + ' running)')
+          if (0 === running) {
+            debug('[CHECK] server.end()');
+            conn.end();
+          }
+        }
+        
+        conn
+          .on('session', function(accept, reject) {
+            debug('[EVENT] session server(f,f)');
           
-        }); // conn.once:session
+            var subtest = findSubtest('session', 'Exec');
+          
+            var session = accept();
+            running += 1;
+            serverExec(what, session, options, subtest, finishedServerSubtest);
+
+          })
+          .on('tcpip', function(accept, reject, info) {
+            debug('[EVENT] tcpip server(f,f,' + inspect(info).split("\n").join('') + ')');
+
+            var subtest = findSubtest('tcpip', 'ForwardOut');
+            
+            var stream = accept();
+            running += 1;
+            serverData(what, stream, options, subtest, finishedServerSubtest);
+          });
       }); // conn.on:ready
     }); // server.on:connection
     
     // CLIENT
 
+    function finishedClientSubtest(err) {
+      clientTestsRunning -= 1;
+      debug('[CHECK] client subtest finished (' + clientTestsRunning + ' running)')
+    }
+    
     client.on('ready', function() {
       debug('[EVENT] ready client()');
-      client.exec('foo --bar', function(err, stream) {
-        assert(!err, makeMsg(what, 'Unexpected exec error: ' + err));
-        debug('[CHECK] client.exec(e,s)');
+      
+      var subtests = Array.from(options['subtests']);
+      
+      function next() {
+        var subtest = subtests.shift();
+        if (!subtest) return;
         
-        var closeEmitted = false;
-    
-        var verifiers = [],
-            verifier;
-    
-        // create verifier on stdout
-        verifier = new data_utils.ChunkVerifier('client.exec.stdout', maxNumber);
-    
-        if ('sODV' === options.client.stdout) {
-          sODV(stream, verifier, timeout, function(err) {
-            assert(undefined === err, 
-                  makeMsg(what, 'sODV ' + verifier.name + ' err: ' + inspect(err)));
-                  
-            debug('[CHECK] ' + verifier.name + ' sODV:cb(' + inspect(err) + ')');
+        if ('Exec' === subtest['type']) {
+          execTestCount += 1;
+          clientTestsRunning += 1;
+          clientExec(what, client, options, subtest, finishedClientSubtest)
+            .on('close', function(args) {
+              closeArgs.push(args);
+            })
+            .on('exit', function(args) {
+              exitArgs.push(args);
+            })
+        }
+        else if ('ForwardOut' === subtest['type']) {
+          port += 1;
+          debug('[CHECK] client.forwardOut(localhost, ' + port + ', somehost, ' + port + ')');
+          client.forwardOut('localhost', port, 'somehost', port, function(err, stream) {
+            assert(!err, makeMsg(what, 'Unexpected exec error: ' + err));
+            debug('[CHECK] client.forwardOut(e,s)');
+            
+            clientTestsRunning += 1;
+            clientData(what, 'forwardOut_' + port, stream, options, subtest, finishedClientSubtest);
           });
-          verifiers.push(verifier);
         }
-        else {
-          assert(!options.client.stdout,
-                 makeMsg('unhandled client stdout Exec parameter: ' + options.client.stdout));
-        }
-    
-        // create verifier on stderr
-        verifier = new data_utils.ChunkVerifier('client.exec.stderr', maxNumber);
-    
-        if ('sODV' === options.client.stderr) {
-          sODV(stream.stderr, verifier, timeout, function(err) {
-            assert(undefined === err, 
-                   makeMsg(what, 'sODV ' + verifier.name + ' err: ' + inspect(err)));
-
-            debug('[CHECK] ' + verifier.name + ' sODV:cb(' + inspect(err) + ')');
-          });      
-          verifiers.push(verifier);
-        }
-        else {
-          assert(!options.client.stderr,
-                 makeMsg('unhandled client stderr Exec parameter: ' + options.client.stderr));
-        }
-    
-        //
-    
-        stream.on('exit', function(code) {
-          debug('[EVENT] exit client.exec.channel(' + inspect(arguments) + ')');
-          
-          exitArgs = new Array(arguments.length);
-          for (var i = 0; i < exitArgs.length; ++i)
-            exitArgs[i] = arguments[i];
-        }).on('close', function(code) {
-          debug('[EVENT] close client.exec.channel(' + inspect(arguments) + ')');
-
-          closeEmitted = true;
-      
-          closeArgs = new Array(arguments.length);
-          for (var i = 0; i < closeArgs.length; ++i)
-            closeArgs[i] = arguments[i];
-      
-        }).on('end', function() {
-          debug('[EVENT] end client.exec.channel()');
-      
-          if (strictStreams2) {
-            assert(closeEmitted === false,
-                   makeMsg(what, 'client.exec.channel emitted close before end'));
-          }
-          else if (closeEmitted) {
-            debug('[IGNORE] client.exec.channel emitted close before end');
-          }
-      
-          // all verifieres must be atEnd !!
-          for (var i = 0; i < verifiers.length; i++) {
-            var verifier = verifiers[i];
-            assert(verifier.atEnd, 
-                   makeMsg(what, 'client.exec.channel verifier ' + verifier.name + ' is not .atEnd'));
-          }
-        }); // stream.on
         
-      }); // client.exec
+        setImmediate(next);
+      }
+      
+      next();
+      
+
     }).on('end', function() {
       debug('[EVENT] end client()');
-      assert.deepEqual(exitArgs,
-                       [100],
-                       makeMsg(what, 'Wrong exit args: ' + inspect(exitArgs)));
-      assert.deepEqual(closeArgs,
-                       [100],
-                       makeMsg(what,
-                               'Wrong close args: ' + inspect(closeArgs)));
+      
+      assert(0 === clientTestsRunning,
+             makeMsg(what, 'Subtests still running: ' + clientTestsRunning));
+      
+      assert(execTestCount === exitArgs.length,
+             makeMsg(what, 'Wrong number of exits: ' + exitArgs.length));
+      assert(execTestCount === closeArgs.length,
+             makeMsg(what, 'Wrong number of closes: ' + exitArgs.length));
+      
+      while (0 < exitArgs.length) {
+        var args = exitArgs.shift();
+        assert.deepEqual(args,
+                         [100],
+                         makeMsg(what, 'Wrong exit args: ' + inspect(args)));
+      }
+      while (0 < closeArgs.length) {
+        var args = closeArgs.shift();
+        assert.deepEqual(args,
+                         [100],
+                         makeMsg(what, 'Wrong close args: ' + inspect(args)));
+      }
     });
   };
   
@@ -410,14 +1099,13 @@ function createExecTest(what, options) {
   return { run:run, what:what };
 }
 
-
 //
 
 function parseTestLine(line) {
   line = line.trim()
   
   var numberKeys = [ 'maxNumber', 'timeout' ],
-      tests = [ 'Exec' ];
+      tests = [ 'Exec', 'ForwardOut' ];
   
   var config = {},
       testFuncName,
@@ -460,25 +1148,21 @@ function parseTestLine(line) {
       return [ new Error('invalid global option ' + element + ' in line: ' + line) ];
     }
   } while (true);
-  
-  // type of test
 
-  var m = /^(\S+)\(\s*(\S*)\s*\)<->\(\s*(\S*)\s*\)$/.exec(elements.join(' '));
-  if (!m) {
-    return [ new Error('invalid test syntax: ' + line)];
-  }
-  
-  testFuncName = 'create' + m[1] + 'Test';
-  
-  // client and server test parameters
-  
+  // subtests
+
   function parseParameters(what, parameterLine) {
+    if (!parameterLine) {
+      return [ new Error(what + ' no parameters') ];
+    }
+    
     var parameters = {},
-        parameterElements = parameterLine.split(',');
-        
-    for (var i = 0; i < parameterElements.length; i++) {
-      var parameter = parameterElements[i],
-          m = /^([iIoOeE]):(\S+)$/.exec(parameter.trim());
+        elements  = parameterLine.split(',');
+    
+    for (var i = 0; i < elements.length; i++) {
+      var parameter = elements[i];
+      
+      var m = /^([iIoOeE]):(\S+)$/.exec(parameter.trim());
       
       if (!m) {
         return [ new Error(what + ' invalid parameter: ' + parameter) ];
@@ -499,29 +1183,60 @@ function parseTestLine(line) {
     return [ null, parameters ];
   }
   
-  var r;
-  
-  if (undefined === m[2]) {
-    return [ new Error('missing client parameters: ' + line) ]
-  }
+  // 
 
-  r = parseParameters('client', m[2]);
-  if (r[0]) {
-    return [ r[0] ];
-  }
-  
-  config['client'] = r[1];
-  
-  if (undefined === m[3]) {
-    return [ new Error('missing server parameters: ' + line) ]
-  }
+  var s = elements.join(' '),
+      r = /(\S+)\(\s*(\S*)\s*\)<->\(\s*(\S*)\s*\)/,
+      elements = s.split(r),
+      subtests = [],
+      subtest = null;
+      
+  while (0 < elements.length) {
+    var element = elements.shift().trim(),
+        r;
 
-  r = parseParameters('server', m[3]);
-  if (r[0]) {
-    return [ r[0] ];
+    if ('' === element) {
+      if (subtest) {
+        return [ new Error('invalid syntax in line: ' + line)];
+      }
+      continue;
+    }
+    
+    // new subtest
+    
+    if (-1 === tests.indexOf(element)) {
+      return [ new Error('unknown test type ' + element + ' in line: ' + line )];
+    }
+    
+    subtest = {
+      type:element
+    };
+    
+    // client options
+    
+    r = parseParameters('client', elements.shift());
+    if (r[0]) {
+      return [ r[0] ];
+    }
+
+    subtest['client'] = r[1];
+
+    //  server options
+    
+    r = parseParameters('server', elements.shift());
+    if (r[0]) {
+      return [ r[0] ];
+    }
+
+    subtest['server'] = r[1];
+    
+    // 
+    
+    subtests.push(subtest);
+    subtest = null;
   }
-  
-  config['server'] = r[1];
+    
+  config['subtests'] = subtests;
   
   return [ null, testFuncName, config ];
 }
@@ -529,8 +1244,8 @@ function parseTestLine(line) {
 var tests = [];
 
 function createTestLines(testLines) {
-  for (var i = 0; i < testLines.length; i++) {
-    var line = testLines[i].trim();
+  for (var line of testLines) {
+    line = line.trim();
     if ('' === line) {
       continue;
     }
@@ -539,12 +1254,7 @@ function createTestLines(testLines) {
       throw r[0];
     }
   
-    if ('createExecTest' === r[1]) {
-      tests.push(createExecTest(line, r[2]));
-    }
-    else {
-      throw new Error('unsupported function: ' + r[1]);
-    }
+    tests.push(createTest(line, r[2]));
   }
 }
 
@@ -613,14 +1323,11 @@ function setup(self, clientcfg, servercfg, strictStreams2, ignoreBadIdenfication
   }
 
   process.nextTick(function() {
-    var address = process.env['ADDRESS'] || 'localhost',
-        port = (process.env['PORT'] && parseInt(process.env['PORT'])) || 0;
-    
-    server.listen(port, address, function() {
+    server.listen(0, 'localhost', function() {
       if (clientcfg.sock)
-        clientcfg.sock.connect(server.address().port, address);
+        clientcfg.sock.connect(server.address().port, 'localhost');
       else {
-        clientcfg.host = address;
+        clientcfg.host = 'localhost';
         clientcfg.port = server.address().port;
       }
       client.connect(clientcfg);
@@ -657,14 +1364,6 @@ process.once('exit', function() {
 
 // starts here - read, generates tests and execute next test
 
-var maybeDelayedNext = next;
-
-if (process.env['PIDDELAY']) {
-  console.error('pid: ' + process.pid);
-  maybeDelayedNext = function() {
-    setTimeout(next, parseInt(process.env['PIDDELAY'] * 1000));
-  }
-}
 
 if ('-' === process.argv[2]) {
   // read from stdin
@@ -673,7 +1372,7 @@ if ('-' === process.argv[2]) {
     inData += d.toString('ascii');
   }).on('end', function() {
     createTestLines(inData.split("\n"));
-    maybeDelayedNext();
+    next();
   }).on('error', function(err) {
     console.error('error reading tests from stdin: ' + err);
     process.exit(1);
@@ -682,9 +1381,9 @@ if ('-' === process.argv[2]) {
 else if (process.argv[2]) {
   // read from file at specified path
   createTestLines(fs.readFileSync(process.argv[2], { encoding:'ascii'}).split("\n"));
-  maybeDelayedNext();
+  next();
 } else {
   // hmm? we read from this directory the "standard" tests...
   createTestLines(fs.readFileSync(join(__dirname, 'streaming-tests.txt'), { encoding:'ascii'}).split("\n"));
-  maybeDelayedNext();
+  next();
 }
